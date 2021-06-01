@@ -233,3 +233,112 @@
             3.如果没有遇到大量的idle-connection或者dead-connection，epoll的效率并不会比select/poll高很多，但是当遇到大量的
             idle_connection，就会发现epoll的效率大大高于select/poll。
 */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <errno.h>
+#include <sys/epoll.h> 
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        return -1;
+    }
+    //传入端口号
+    int port = atoi(argv[1]);
+    //创建listen fd
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if((sockfd < 0)) {
+        return -1;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(struct sockaddr_in));
+
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    //绑定listen fd
+    if (bind(sockfd, (struct sockaddr*)&addr, sizeof(struct sockaddr_in))) {
+        return -2;
+    }
+
+    if (listen(sockfd, 5) < 0) {
+        return -3;
+    }
+    //创建一个管理的fd
+    int epfd = epoll_create(1);
+    
+    //对于events数组的大小，对于IO密集型可以做到总数量的1/100
+    struct epoll_event ev, events[1024] = {0};
+    ev.events = EPOLLIN;
+    ev.data.fd = sockfd;
+    //将监听fd加入红黑树
+    epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev);
+
+    while (1) {
+        //等待数据，事件个数返回给nready
+        int nready = epoll_wait(epfd, events, 1024, -1);
+        if (nready < -1) {
+            break;
+        }
+
+        int i = 0;
+        for (i = 0; i < nready; ++i) {
+            
+            //socket分为两类：1.accept() 2.recv()/send()
+            if (events[i].data.fd == sockfd) {
+
+                struct sockaddr_in client_addr;
+                memset(&client_addr, 0, sizeof(struct sockaddr_in));
+                socklen_t client_len = sizeof(client_addr);
+
+                //只有一个socket是监听的，其他全部都是accept返回的
+                int clientfd = accept(sockfd, (struct sockaddr*)&client_addr, &client_len);
+                if (clientfd <= 0) continue;
+
+                char str[INET_ADDRSTRLEN] = {0};
+                printf("recv from %s at port %d\n", inet_ntop(AF_INET, &client_addr.sin_addr, str, sizeof(str)), ntohs(client_addr.sin_port));
+
+                ev.events = EPOLLIN | EPOLLET;
+                ev.data.fd = clientfd;
+                //将accept出来的socket
+                epoll_ctl(epfd, EPOLL_CTL_ADD, clientfd, &ev);
+            } else {
+                int clientfd = events[i].data.fd;
+
+                char buffer[1024] = {0};
+                int ret = recv(clientfd, buffer, 1024, 0);
+                if (ret < 0) {
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        printf("EAGAIN\n");
+                    } else {
+
+                    }
+                    close(clientfd);
+
+                    ev.events = EPOLLIN;
+                    ev.data.fd = clientfd;
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, clientfd, &ev);
+
+                } else if (ret == 0) {
+                    printf("disconnect %d\n", clientfd);
+                    close(clientfd);
+
+                    ev.events = EPOLLIN;
+                    ev.data.fd = clientfd;
+                    epoll_ctl(epfd, EPOLL_CTL_DEL, clientfd, &ev);
+                } else {
+
+                    printf("Recv：%s, %d Bytes\n", buffer, ret);
+
+                }
+            }
+
+        }
+    }
+}
