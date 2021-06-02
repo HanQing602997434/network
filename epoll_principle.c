@@ -111,7 +111,7 @@
             return -1;
         }   
 
-        free(epi);  //释放epitem
+        free(epi);  //释放epitem 
 
         pthread_mutex_unlock(&ep->mtx);  //释放互斥锁
 
